@@ -42,7 +42,7 @@ rhino前置作業：
 - 再到資料夾LangGraph\src\mcp\rhino-mcp中使用指令"uv pip install -e ."安裝依賴(本專案專屬，已新增server工具)
 
 rhino使用辦法：
-1. 確認gemini API有放進.env內；
+1. 確認gemini API Key有放進.env內；
 2. 打開rhino_mcp修改第68行的command路徑位置為你的 rhino_mcp 虛擬環境python.exe ；
 3. 打開rhino進行以下操作開啟MCP:
 - Click on the "Tools" menu
