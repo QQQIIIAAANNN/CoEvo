@@ -37,20 +37,20 @@
 
 ### 🗺️ RHINO MCP 叮嚀
 rhino前置作業：
-需要先設定虛擬環境 rhino_mcp 使用python=3.10
-接者使用"pip install uv" 安裝uv
-再到資料夾LangGraph\src\mcp\rhino-mcp中使用指令"uv pip install -e ."安裝依賴(不要從github下載，本專案有新增server工具)
+- 需要先設定虛擬環境 rhino_mcp 使用python=3.10
+- 接者使用"pip install uv" 安裝uv
+- 再到資料夾LangGraph\src\mcp\rhino-mcp中使用指令"uv pip install -e ."安裝依賴(本專案專屬，已新增server工具)
 
 rhino使用辦法：
-1.確認gemini API有放進.env內；
-2.打開rhino_mcp修改第68行的command路徑位置為你的 rhino_mcp 虛擬環境python.exe ；
-3.打開rhino進行以下操作開啟MCP:
-Click on the "Tools" menu
-Select "Python Script" -> "Run.."
-Navigate to and select rhino_mcp_client.py
-Navigate to and select grasshopper_mcp_client (如果有用GH)
+1. 確認gemini API有放進.env內；
+2. 打開rhino_mcp修改第68行的command路徑位置為你的 rhino_mcp 虛擬環境python.exe ；
+3. 打開rhino進行以下操作開啟MCP:
+- Click on the "Tools" menu
+- Select "Python Script" -> "Run.."
+- Navigate to and select rhino_mcp_client.py
+- Navigate to and select grasshopper_mcp_client (如果有用GH)
 位置通常在LangGraph\src\mcp\rhino-mcp\rhino_mcp內。
-4.先確認MCP有沒有安裝成功，可以用claude抓看看，OK了就能正常使用。
+4. 先確認MCP有沒有安裝成功，可以用claude抓看看，OK了就能正常使用。
 
 其他事項：
 目前只支援gemini，如果想換模型要修改rhino_mcp 45-63行的LLM set。
