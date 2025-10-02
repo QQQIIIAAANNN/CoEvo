@@ -1,0 +1,11 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "Design_T_Graph": "./src/design_T_graph.py:graph",
+    "General_Arch_graph": "./src/General_Arch_graph.py:graph",
+    "Tools_Test": "./src/tools_test.py:graph",
+    "Mcp_Test": "./src/mcp_test.py:graph",
+    "Rhino_Mcp": "./src/rhino_mcp.py:graph"
+  },
+  "env": ".env"
+}

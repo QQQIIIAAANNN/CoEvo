@@ -1,0 +1,220 @@
+{
+  "51": {
+    "inputs": {
+      "samples": [
+        "60",
+        0
+      ],
+      "vae": [
+        "54",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "52": {
+    "inputs": {
+      "width": 1024,
+      "height": 768,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像"
+    }
+  },
+  "54": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "58": {
+    "inputs": {
+      "model": [
+        "80",
+        0
+      ],
+      "conditioning": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "基本引导器"
+    }
+  },
+  "59": {
+    "inputs": {
+      "clip_name1": "t5xxl_fp16.safetensors",
+      "clip_name2": "clip_l.safetensors",
+      "type": "flux",
+      "device": "default"
+    },
+    "class_type": "DualCLIPLoader",
+    "_meta": {
+      "title": "双CLIP加载器"
+    }
+  },
+  "60": {
+    "inputs": {
+      "noise": [
+        "69",
+        0
+      ],
+      "guider": [
+        "58",
+        0
+      ],
+      "sampler": [
+        "64",
+        0
+      ],
+      "sigmas": [
+        "66",
+        0
+      ],
+      "latent_image": [
+        "52",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "自定义采样器（高级）"
+    }
+  },
+  "63": {
+    "inputs": {
+      "unet_name": "flux1-dev-fp8.safetensors",
+      "weight_dtype": "fp8_e4m3fn"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "64": {
+    "inputs": {
+      "sampler_name": "euler_ancestral"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "K采样器选择"
+    }
+  },
+  "65": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "51",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "66": {
+    "inputs": {
+      "scheduler": "normal",
+      "steps": 25,
+      "denoise": 1,
+      "model": [
+        "80",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "基本调度器"
+    }
+  },
+  "69": {
+    "inputs": {
+      "noise_seed": 265631675858788
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "随机噪波"
+    }
+  },
+  "80": {
+    "inputs": {
+      "lora_name": "FLUX\\timber-pavilion-000012.safetensors",
+      "strength_model": 1.2000000000000002,
+      "strength_clip": 1.0000000000000002,
+      "model": [
+        "63",
+        0
+      ],
+      "clip": [
+        "59",
+        0
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "加载LoRA"
+    }
+  },
+  "82": {
+    "inputs": {
+      "text": [
+        "89",
+        0
+      ],
+      "clip": [
+        "80",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "86": {
+    "inputs": {
+      "value": "timbercurve,1 building, overall building"
+    },
+    "class_type": "easy string",
+    "_meta": {
+      "title": "fixed text"
+    }
+  },
+  "87": {
+    "inputs": {
+      "value": "Aerial view of a three-story memorial tower and observation deck located in Tainan City, featuring elegant curved forms and modern aesthetics. The building is constructed primarily from CLT (cross-laminated timber), showcasing clear structural segmentation and sustainability. The design emphasizes natural ventilation and lighting, harmoniously blending with the surrounding environment. The exterior features fluid surfaces and geometric segmentation, creating visual depth from various angles. The dynamic roof garden and vertical green walls enhance ecological interaction. The structure stands elevated to prevent moisture ingress. Overall, the building presents a photorealistic, high-quality architectural rendering with a focus on sustainability and artistic value. 8K, detailed, best quality, architectural rendering"
+    },
+    "class_type": "easy string",
+    "_meta": {
+      "title": "input text"
+    }
+  },
+  "89": {
+    "inputs": {
+      "separator": "",
+      "prompt1": [
+        "86",
+        0
+      ],
+      "prompt2": [
+        "87",
+        0
+      ]
+    },
+    "class_type": "easy promptConcat",
+    "_meta": {
+      "title": "提示词联结"
+    }
+  }
+}
