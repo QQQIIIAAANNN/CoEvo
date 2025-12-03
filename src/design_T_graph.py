@@ -125,6 +125,9 @@ class GlobalState(TypedDict, total=False):
     evaluation_result: list
     evaluation_status: str
     final_evaluation: str
+    # PM 節點相關欄位
+    pm_plan: dict  # PM 的執行計劃
+    pm_phase: str  # PM 的當前階段：execution / completed
 
 def custom_add_messages(existing: list, new: list) -> list:
     # 確保 new 為列表
@@ -140,6 +143,26 @@ def custom_add_messages(existing: list, new: list) -> list:
     return existing + processed_new
 
 # =============================================================================
+# 輔助函數：檢查節點是否應該執行
+# =============================================================================
+def should_execute_node(state: GlobalState, node_name: str) -> bool:
+    """檢查當前節點是否在 PM 計劃中被啟用"""
+    pm_plan = state.get("pm_plan", {})
+    enabled_agents = pm_plan.get("enabled_agents", {})
+    
+    # 如果沒有 PM 計劃，默認執行（向下兼容）
+    if not enabled_agents:
+        return True
+    
+    # 檢查節點是否被啟用
+    is_enabled = enabled_agents.get(node_name, True)
+    
+    if not is_enabled:
+        print(f"⏭️  {node_name} 節點被 PM 計劃標記為 SKIP，直接略過")
+    
+    return is_enabled
+
+# =============================================================================
 # 各任務定義
 # =============================================================================
 
@@ -151,6 +174,13 @@ class QuestionTask:
     def run(self, state: GlobalState, config: GraphOverallConfig | dict):
         if state is not None:
             self.state = state
+        
+        # PM 計劃檢查：如果本輪不需要執行此節點，直接返回現有狀態
+        if not should_execute_node(self.state, "question_summary"):
+            return {
+                "設計目標x設計需求x方案偏好": self.state.get("設計目標x設計需求x方案偏好", []),
+                "design_summary": self.state.get("design_summary", "")
+            }
         
         active_config = ensure_graph_overall_config(config)
 
@@ -249,6 +279,13 @@ class SiteAnalysisTask:
         print("DEBUG: SiteAnalysisTask.run CALLED")
         if state is not None:
             self.state = state
+        
+        # PM 計劃檢查：如果本輪不需要執行此節點，直接返回現有狀態
+        if not should_execute_node(self.state, "analyze_site"):
+            return {
+                "site_analysis": self.state.get("site_analysis", "PM 計劃跳過基地分析"),
+                "analysis_img": self.state.get("analysis_img", "")
+            }
         
         active_config = ensure_graph_overall_config(config)
         print(f"DEBUG SiteAnalysisTask: Processed active_config.run_site_analysis: {active_config.run_site_analysis}")
@@ -1996,30 +2033,146 @@ Score: {vid_total_score}
             "current_round": self.state["current_round"]
         }
 
-# 評估檢查任務：根據評估次數決定流程路由（參考條件分支範本邏輯）
-class EvaluationCheckTask:
+# PM 節點：專案管理器，負責動態規劃流程與決定代理執行
+class ProjectManagerTask:
     def __init__(self, state: GlobalState):
         self.state = state
+
+    def _decide_agents_for_round(self, current_round: int, config: GraphOverallConfig, state: GlobalState) -> dict:
+        """根據輪次和狀態智能決定本輪要執行的代理"""
+        
+        # 第一輪（輪次0）：完整流程
+        if current_round == 0:
+            return {
+                "question_summary": True,                      # 首輪必須分析用戶需求
+                "analyze_site": config.run_site_analysis,      # 根據配置決定
+                "designThinking": True,                        # 首輪必須生成設計
+                "GateCheck1": True,
+                "shell_prompt": True,
+                "image_render": True,
+                "GateCheck2": True,
+                "future_scenario": True,
+                "generate_3D": True,
+                "deep_evaluation": True
+            }
+        
+        # 第二輪及以後：智能判斷
+        else:
+            # 檢查是否有用戶需求變更（實際應用中可以通過檢測新輸入來判斷）
+            has_design_summary = bool(state.get("design_summary"))
+            has_site_analysis = bool(state.get("site_analysis"))
+            
+            # 獲取上一輪的評估結果，決定是否需要調整
+            last_eval = state.get("evaluation_result", [])
+            gate1_status = state.get("GATE1", "")
+            
+            return {
+                "question_summary": False,                     # 第二輪起不再需要重新分析用戶需求
+                "analyze_site": False,                         # 第二輪起不再需要重新分析基地
+                "designThinking": True,                        # 每輪都需要根據改進建議重新設計
+                "GateCheck1": True,                            # 每輪都需要評審
+                "shell_prompt": True,                          # 每輪都需要生成新 prompt
+                "image_render": True,                          # 每輪都需要生成新圖
+                "GateCheck2": True,                            # 每輪都需要評審圖片
+                "future_scenario": True,                       # 每輪都需要生成未來情境
+                "generate_3D": True,                           # 每輪都需要生成3D
+                "deep_evaluation": True                        # 每輪都需要深度評估
+            }
 
     def run(self, state: GlobalState, config: GraphOverallConfig | dict):
         if state is not None:
             self.state = state
         
-        active_config = ensure_graph_overall_config(config) # 處理 config
+        active_config = ensure_graph_overall_config(config)
+        current_llm = active_config.llm_config.get_llm()
+        active_language = active_config.llm_output_language
 
-        current_iteration_count = self.state.get("current_round", 0) # current_round 代表已完成的輪次，下一輪是 current_round + 1
+        current_round = self.state.get("current_round", 0)
         max_rounds = active_config.max_evaluation_rounds
-
-        # current_round 從0開始計數。如果 max_rounds 是3，
-        # 當 current_round 是 0, 1, 2 時，表示還可以繼續迭代。
-        # 當 current_round 變成 3 時，表示已經完成了3輪，應該結束。
-        if current_iteration_count < max_rounds:
-            self.state["evaluation_status"] = "NO"
-            print(f"EvaluationCheckTask：目前已完成 {current_iteration_count} 輪評估，未達到最大輪數 {max_rounds}，將返回 RAGdesignThinking 執行下一輪。")
+        
+        # PM 判斷當前階段
+        is_initial_run = current_round == 0 and not self.state.get("design_summary")
+        is_after_evaluation = current_round > 0 and self.state.get("evaluation_result")
+        
+        print(f"\n{'='*60}")
+        print(f"🎯 PM 節點啟動 | 輪次: {current_round}/{max_rounds}")
+        print(f"   階段: {'初始規劃' if is_initial_run else '評估後決策' if is_after_evaluation else '流程控制'}")
+        print(f"{'='*60}")
+        
+        # ============ 初始階段或評估後：決定本輪要執行哪些代理 ============
+        if is_initial_run or is_after_evaluation:
+            # 檢查是否達到最大輪次（在生成計劃前先檢查）
+            if current_round >= max_rounds:
+                print(f"🏁 PM 決策: 已達到最大輪次 ({current_round}/{max_rounds})，生成最終評估報告")
+                
+                # 生成最終評估報告
+                eval_results = self.state.get("evaluation_result", [])
+                eval_counts = self.state.get("evaluation_count", [])
+                
+                eval_results_formatted = "\n".join([
+                    f"輪次 {r.get('current_round', '?')}: 圖片評分 {r.get('eval_result_image', 'N/A')[:100]}..."
+                    for r in eval_results if isinstance(r, dict)
+                ])
+                
+                eval_counts_formatted = "\n".join([
+                    f"輪次 {list(c.keys())[0]}: {list(c.values())[0]} 分"
+                    for c in eval_counts if isinstance(c, dict) and c
+                ])
+                
+                summary_prompt = active_config.final_evaluation_summary_prompt_template.format(
+                    eval_results_formatted=eval_results_formatted or "無評估結果",
+                    eval_counts_formatted=eval_counts_formatted or "無評分結果",
+                    short_memory="",
+                    long_memory="",
+                    current_round=current_round,
+                    llm_output_language=active_language
+                )
+                
+                final_summary_msg = current_llm.invoke([SystemMessage(content=summary_prompt)])
+                final_evaluation = final_summary_msg.content if hasattr(final_summary_msg, "content") else "最終評估生成失敗"
+                
+                self.state["final_evaluation"] = final_evaluation
+                self.state["pm_phase"] = "completed"
+                self.state["evaluation_status"] = "END"
+                
+                print(f"✅ PM 最終評估完成")
+                print(f"📊 總輪次: {current_round}, 總評估: {len(eval_results)}")
+                
+                return {
+                    "final_evaluation": final_evaluation,
+                    "pm_phase": "completed",
+                    "evaluation_status": "END"
+                }
+            
+            # 未達到最大輪次，生成本輪的執行計劃
+            pm_plan = {
+                "enabled_agents": self._decide_agents_for_round(current_round, active_config, self.state),
+                "workflow_mode": "adaptive",  # adaptive / full / quick / minimal
+                "current_round": current_round
+            }
+            
+            print(f"📋 PM 為輪次 {current_round} 生成執行計劃:")
+            print(f"   - 啟用的代理: {sum(pm_plan['enabled_agents'].values())}/{len(pm_plan['enabled_agents'])}")
+            for agent, enabled in pm_plan['enabled_agents'].items():
+                status = "✅" if enabled else "⏭️ (SKIP)"
+                print(f"     {status} {agent}")
+            
+            self.state["pm_plan"] = pm_plan
+            self.state["pm_phase"] = "execution"
+            self.state["evaluation_status"] = "CONTINUE"
+            
+            return {
+                "pm_plan": pm_plan, 
+                "pm_phase": "execution",
+                "evaluation_status": "CONTINUE"
+            }
+        
+        # ============ 預設：維持流程 ============
         else:
-            self.state["evaluation_status"] = "YES"
-            print(f"EvaluationCheckTask：目前已完成 {current_iteration_count} 輪評估，已達到最大輪數 {max_rounds}，流程結束。")
-        return {"evaluation_status": self.state["evaluation_status"]}
+            print(f"⚠️ PM 節點: 異常狀態，使用預設流程")
+            self.state["pm_phase"] = "execution"
+            self.state["evaluation_status"] = "CONTINUE"
+            return {"pm_phase": "execution", "evaluation_status": "CONTINUE"}
 
 # 總評估任務(用戶可介入)
 class FinalEvaluationTask:
@@ -2100,57 +2253,60 @@ initial_state = {
     "GATE_REASON2": "",
     "current_round": 0,
     "evaluation_count": [],
-    "evaluation_status": "",
+    "evaluation_status": "CONTINUE",  # PM 初始狀態為繼續執行
     "evaluation_result": [],
-    "final_evaluation": ""
+    "final_evaluation": "",
+    # PM 節點相關初始狀態
+    "pm_plan": {},
+    "pm_phase": "initial"
 }
 
 question_task = QuestionTask(initial_state)
 site_analysis_task = SiteAnalysisTask(initial_state)
 rag_thinking = RAGdesignThinking(initial_state)
 gate_check1 = GateCheck1(initial_state)
-shell_prompt_task = OuterShellPromptTask(initial_state) # 註釋掉
-image_render_task = CaseScenarioGenerationTask(initial_state) # 註釋掉
-# unified_image_gen_task = UnifiedImageGenerationTask(initial_state) # 新增
+shell_prompt_task = OuterShellPromptTask(initial_state)
+image_render_task = CaseScenarioGenerationTask(initial_state)
 gate_check2 = GateCheck2(initial_state)
 future_scenario_task = FutureScenarioGenerationTask(initial_state)
 generate_p3d_task = Generate3DPerspective(initial_state)
 deep_evaluation_task = DeepEvaluationTask(initial_state)
-evaluation_check_task = EvaluationCheckTask(initial_state)
-final_eval_task = FinalEvaluationTask(initial_state)
+pm_task = ProjectManagerTask(initial_state)  # PM 節點取代 evaluation_check 和 final_eval
 
-workflow.set_entry_point("question_summary")
+# PM 作為流程的入口和出口
+workflow.set_entry_point("pm")
 
+# 添加所有節點
+workflow.add_node("pm", pm_task.run)  # PM 節點
 workflow.add_node("question_summary", question_task.run)
 workflow.add_node("analyze_site", site_analysis_task.run)
 workflow.add_node("designThinking", rag_thinking.run)
 workflow.add_node("GateCheck1", gate_check1.run)
-workflow.add_node("shell_prompt", shell_prompt_task.run) # 註釋掉
-workflow.add_node("image_render", image_render_task.run) # 註釋掉
-# workflow.add_node("img_generation", unified_image_gen_task.run) # 新增
+workflow.add_node("shell_prompt", shell_prompt_task.run)
+workflow.add_node("image_render", image_render_task.run)
 workflow.add_node("GateCheck2", gate_check2.run)
-workflow.add_node("future_scenario", future_scenario_task.run) # 恢復獨立節點
-workflow.add_node("generate_3D", generate_p3d_task.run)       # 恢復獨立節點
+workflow.add_node("future_scenario", future_scenario_task.run)
+workflow.add_node("generate_3D", generate_p3d_task.run)
 workflow.add_node("deep_evaluation", deep_evaluation_task.run)
-workflow.add_node("evaluation_check", evaluation_check_task.run)
-workflow.add_node("final_eval", final_eval_task.run)
 
+# PM 與流程的連接
+workflow.add_edge("deep_evaluation", "pm")   # 評估完成後回到 PM 決策
+
+# 原有流程邊（保持不變）
 workflow.add_edge("question_summary", "analyze_site")
 workflow.add_edge("analyze_site", "designThinking")
 workflow.add_edge("designThinking", "GateCheck1")
-workflow.add_edge("shell_prompt", "image_render") # 註釋掉
-workflow.add_edge("image_render", "GateCheck2") # 註釋掉
-# workflow.add_edge("img_generation", "GateCheck2") # 新增
-workflow.add_edge("future_scenario", "generate_3D") # 恢復邊
-workflow.add_edge("generate_3D", "deep_evaluation") # 恢復邊
-workflow.add_edge("deep_evaluation", "evaluation_check")
-workflow.add_edge("final_eval", END)
+workflow.add_edge("shell_prompt", "image_render")
+workflow.add_edge("image_render", "GateCheck2")
+workflow.add_edge("future_scenario", "generate_3D")
+workflow.add_edge("generate_3D", "deep_evaluation")
 
+# 原有的條件邊（保持不變）
 workflow.add_conditional_edges(
     "GateCheck1",
     lambda state: "YES" if state.get("GATE1") == "有" else "NO",
     {
-        "YES": "shell_prompt",  # 修改：指向新節點
+        "YES": "shell_prompt",
         "NO": "designThinking"  
     }
 )
@@ -2159,13 +2315,20 @@ workflow.add_conditional_edges(
     "GateCheck2",
     lambda state: "YES" if isinstance(state.get("GATE2"), int) else "NO",
     { 
-        "YES": "future_scenario", # 修改：GateCheck2 的 YES 分支指向 future_scenario
+        "YES": "future_scenario",
         "NO": "shell_prompt" 
     }
 )
 
-workflow.add_conditional_edges("evaluation_check",lambda state: state["evaluation_status"],
-    { "NO": "designThinking",   "YES": "final_eval"  })
+# PM 的條件邊：決定繼續執行或結束
+workflow.add_conditional_edges(
+    "pm",
+    lambda state: state.get("evaluation_status", "CONTINUE"),
+    {
+        "CONTINUE": "question_summary",  # 進入流程（節點會自行檢查是否執行）
+        "END": END  # 達到最大輪次，結束流程
+    }
+)
 
 graph = workflow.compile()
 

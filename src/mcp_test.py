@@ -53,8 +53,8 @@ try:
         exit(1)
     else:
         agent_llm = ChatGoogleGenerativeAI(  #gemini-2.5-pro-exp-03-25  "gemini-2.5-pro-preview-03-25"
-            model="gemini-2.5-flash-preview-04-17", #gemini-2.0-flash "gemini-2.5-flash-preview-04-17" 
-            temperature=0.1,
+            model="gemini-2.5-flash", #gemini-2.0-flash "gemini-2.5-flash-preview-04-17" 
+            temperature=0.5,
             google_api_key=api_key
         )
         print(f"Agent LLM ({agent_llm.model}) 初始化成功 (convert_system_message_to_human=False/Default)。")

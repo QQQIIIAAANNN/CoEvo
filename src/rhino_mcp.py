@@ -42,19 +42,112 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 load_dotenv()
 
+# =============================================================================
+# API Key 動態管理 (Free/VIP 切換)
+# =============================================================================
+class APIKeyManager:
+    """管理 Free 和 VIP API Key 的自動切換"""
+    def __init__(self):
+        self.using_vip = False
+        self.vip_calls_remaining = 0
+        self.last_error_time = 0
+        self.consecutive_quota_errors = 0
+        
+    def should_use_vip(self) -> bool:
+        """判斷是否應該使用 VIP Key"""
+        return self.using_vip and self.vip_calls_remaining > 0
+    
+    def handle_quota_error(self) -> bool:
+        """
+        處理配額錯誤，切換到 VIP Key
+        Returns: True if switched to VIP, False if no VIP available
+        """
+        if not os.getenv("GEMINI_API_KEY_VIP"):
+            print("  !! ❌ 配額已滿且無 VIP Key (GEMINI_API_KEY_VIP)，無法繼續")
+            return False
+            
+        self.consecutive_quota_errors += 1
+        current_time = time.time()
+        
+        # 如果在短時間內連續遇到配額錯誤，增加 VIP 使用輪數
+        if current_time - self.last_error_time < 60:  # 1分鐘內
+            vip_rounds = min(10, 5 * self.consecutive_quota_errors)  # 最多10輪
+        else:
+            vip_rounds = 5
+            self.consecutive_quota_errors = 1
+        
+        self.using_vip = True
+        self.vip_calls_remaining = vip_rounds
+        self.last_error_time = current_time
+        
+        print(f"  >> ⚠️  配額已滿，切換到 VIP Key，將執行 {vip_rounds} 輪後返回免費版")
+        return True
+    
+    def decrement_vip_calls(self):
+        """VIP 調用計數遞減"""
+        if self.vip_calls_remaining > 0:
+            self.vip_calls_remaining -= 1
+            print(f"  >> 💎 VIP Key 剩餘調用: {self.vip_calls_remaining}")
+            
+            if self.vip_calls_remaining == 0:
+                self.using_vip = False
+                self.consecutive_quota_errors = 0
+                print("  >> ✅ VIP 輪數用完，返回免費 Key")
+    
+    def get_current_key_type(self) -> str:
+        """獲取當前 Key 類型描述"""
+        return "VIP💎" if self.should_use_vip() else "Free🆓"
+
+# 全局管理器實例
+api_key_manager = APIKeyManager()
+
 # --- LLM Setup ---
 try:
     api_key = os.getenv("GEMINI_API_KEY")
+    api_key_vip = os.getenv("GEMINI_API_KEY_VIP")
+
     if not api_key:
         print("錯誤：找不到 GEMINI_API_KEY 環境變數。")
         exit(1)
     else:
-        agent_llm = ChatGoogleGenerativeAI(  #gemini-2.5-pro-exp-03-25  "gemini-2.5-pro-preview-03-25"
-            model="gemini-2.5-flash", #gemini-2.0-flash "gemini-2.5-flash-preview-04-17" 
-            temperature=0.1,
+        # 1. 初始化免費版 LLM
+        agent_llm_free = ChatGoogleGenerativeAI(
+            model="gemini-2.5-pro",
+            temperature=0.5,
             google_api_key=api_key
         )
-        print(f"Agent LLM ({agent_llm.model}) 初始化成功 (convert_system_message_to_human=False/Default)。")
+        
+        fast_llm_free = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash-lite",
+            temperature=0.5,
+            google_api_key=api_key
+        )
+
+        # 2. 初始化 VIP 版 LLM (如果有的話)
+        agent_llm_vip = None
+        fast_llm_vip = None
+        if api_key_vip:
+            agent_llm_vip = ChatGoogleGenerativeAI(
+                model="gemini-2.5-pro",
+                temperature=0.5,
+                google_api_key=api_key_vip
+            )
+            fast_llm_vip = ChatGoogleGenerativeAI(
+                model="gemini-2.5-flash-lite",
+                temperature=0.5,
+                google_api_key=api_key_vip
+            )
+            print(f"✅ VIP Agent LLM 初始化成功 (備用，遇到配額限制時自動切換)。")
+        else:
+            print("⚠️  未設置 GEMINI_API_KEY_VIP，遇到配額限制時將無法自動切換")
+        
+        # 預設主要 LLM 指向免費版
+        agent_llm = agent_llm_free
+        fast_llm = fast_llm_free
+        
+        print(f"Agent LLM ({agent_llm.model}) 初始化成功 (預設 Free)。")
+        print(f"Fast LLM ({fast_llm.model}) 初始化成功 (預設 Free)。")
+
     utility_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
     print("Utility LLM (OpenAI for Router) 初始化成功。")
 except Exception as e:
@@ -110,7 +203,7 @@ class MCPAgentState(TypedDict):
     # --- 新增: 存儲CSV報告路徑 ---
     saved_csv_path: Optional[str] = None
     # --- 新增: LLM 調用延遲時間管理 (秒) ---
-    rpm_delay: float = 6.5  # 預設 6.5 秒，避免速率限制，如果有付費可以改為0.5
+    rpm_delay: float = 12.5  # flash預設 6.5 秒，避免速率限制，如果有付費可以改為0.5  pro預設12
 
 # =============================================================================
 # 本地工具定義 (Local Tools)
@@ -341,9 +434,16 @@ RHINO_AGENT_EXECUTION_PROMPT = SystemMessage(content="""你是一個嚴格按計
                                              
 **執行規則:**                                                                       
 1.  **要調用工具來執行動作，請必須生成 `tool_calls` 在首位的 AIMessage 以請求該工具調用**。**不要僅用文字描述你要調用哪個工具，而是實際生成工具調用指令。** 一次只生成一個工具調用請求。
-2.  嚴格禁止使用 f-string 格式化字串。請使用 `.format()` 或 `%` 進行字串插值。(此為 IronPython 2.7 環境限制)
-3.  **仔細參考工具描述或 Mcp 文檔確認函數用法與參數正確性，必須實際生成結構化的工具呼叫指令。**
-4.  **多方案管理 (重要):**
+2.  **嚴格的單步執行原則 (極度重要):**
+    * **每次工具調用只能完成計劃中的一個階段目標**，絕不可嘗試在單次工具調用中完成多個步驟
+    * **代碼長度限制:** 每次生成的 Rhino/Revit 代碼應保持簡潔，通常不應超過 50-80 行。如果某個步驟需要更多代碼，請將其拆分為更小的子步驟
+    * **專注當前目標:** 只生成完成當前階段目標所需的最少代碼，不要提前處理後續步驟
+    * **範例:** 如果計劃中的步驟是"創建圖層結構"，則只創建圖層；如果步驟是"創建第一個拱形肋條"，則只創建一個肋條，不要同時創建多個或添加其他元素
+3.  嚴格禁止使用 f-string 格式化字串。請使用 `.format()` 或 `%` 進行字串插值。(此為 IronPython 2.7 環境限制)
+4.  **RhinoScript 函數使用注意事項:**
+    * **仔細查閱 rhinoscriptsyntax 和 Rhino.Geometry 的正確函數名稱和參數**，避免使用不存在的函數
+5.  **仔細參考工具描述或 Mcp 文檔確認函數用法與參數正確性，必須實際生成結構化的工具呼叫指令。**
+6.  **多方案管理 (重要):**
     * 當生成多個方案時，**每個方案必須完全獨立**，視為單獨的任務序列處理
     * **方案隔離原則:**
         * **每個方案必須有自己的頂層圖層**，使用 `rs.AddLayer("方案A_描述")` 創建
@@ -351,12 +451,12 @@ RHINO_AGENT_EXECUTION_PROMPT = SystemMessage(content="""你是一個嚴格按計
         * **所有物件必須正確配置到其所屬方案的圖層**，使用 `rs.CurrentLayer("方案X_描述::子圖層")`
         * **完成每個方案後必須截圖**，再開始下一個方案
     * **避免方案間的量體重疊**，可考慮在不同方案間使用座標偏移
-5.  **量體生成策略:**
+7.  **量體生成策略:**
     * **空間操作優先使用布林運算**：使用 `rs.BooleanUnion()`、`rs.BooleanDifference()`、`rs.BooleanIntersection()` 創造複雜形態
     * **善用幾何變換**：使用旋轉、縮放、移動等操作調整物件姿態，創造更豐富的空間層次
     * **避免無效量體**：不要創建過小、位置不合理或對空間表達無貢獻的量體
     * **注意 IronPython 2.7 語法限制**：Rhino 8使用IronPython 2.7，禁止使用Python 3特有語法   
-6.  **曲面造型策略:**
+8.  **曲面造型策略:**
         *   **曲面創建類別：**
             *   **掃掠 (Sweep):**
                 *   `rs.AddSweep1(rail_curve_id, shape_curve_ids)`: 將剖面曲線列表 `shape_curve_ids` 沿單一軌道 `rail_curve_id` 掃掠成曲面。注意剖面曲線的方向和順序。
@@ -373,16 +473,24 @@ RHINO_AGENT_EXECUTION_PROMPT = SystemMessage(content="""你是一個嚴格按計
                 *   `rs.ExtrudeCurveStraight(curve_id, start_point, end_point)` 或 `rs.ExtrudeCurveStraight(curve_id, direction_vector)`: 將曲線 `curve_id` 沿直線擠出指定距離和方向。
                 *   `rs.ExtrudeCurveTapered(curve_id, distance, direction, base_point, angle)`: 將曲線 `curve_id` 沿 `direction` 方向擠出 `distance` 距離，同時以 `base_point` 為基準、按 `angle` 角度進行錐化。
                 *   `rs.ExtrudeSurface(surface_id, path_curve_id, cap=True/False)`: 將曲面 `surface_id` 沿路徑曲線 `path_curve_id` 擠出成實體或開放形狀，可選是否封口 (`cap`)。
-7.  **Rhino 圖層管理 (重要):** 當生成 Rhino 代碼時：
+        *   **封閉性檢查與修正 (極度重要):**
+            *   創建曲面後，**必須**使用 `rs.IsPolysurface(object_id)` 和 `rs.IsClosed(object_id)` 檢查物件是否為封閉多重曲面
+            *   對於開放曲面，嘗試以下修正方法：
+                1. 使用 `rs.CapPlanarHoles(surface_id)` 封閉平面開口
+                2. 使用 `rs.JoinSurfaces([surface_id1, surface_id2, ...], delete_input=True)` 接合相鄰曲面
+                3. 確保擠出操作時使用 `cap=True` 參數來自動封閉端面
+            *   **在每次創建曲面物件後，必須驗證其封閉性。如果不封閉，應立即採取修正措施。**
+            *   對於複雜造型，優先使用能直接生成封閉實體的方法（如從封閉曲線擠出），而非依賴後續接合
+9.  **Rhino 圖層管理 (重要):** 當生成 Rhino 代碼時：
         *   如果當前階段目標**明確要求**在特定圖層上操作，**必須**在相關操作（如創建物件）**之前**包含 `rs.CurrentLayer('目標圖層名稱')` 指令。
         *   如果目標涉及控制圖層可見性（例如，準備截圖），**必須**包含 `rs.LayerVisible('圖層名', True/False)` 指令。
     *   **截圖前的圖層準備：在調用 `capture_focused_view` 進行截圖之前，必須確保只有與當前截圖目標直接相關的圖層是可見的。所有其他不相關的圖層，特別是那些可能遮擋目標視圖的圖層（例如，其他樓層、其他設計方案的頂層圖層、輔助線圖層等），都應使用 `rs.LayerVisible('圖層名', False)` 進行隱藏。 使用透視/兩點透視截圖時須確保相關圖層都有開啟**
-8. **最終步驟 (Rhino/Revit):**
+10. **最終步驟 (Rhino/Revit):**
     *   對於 Rhino/Revit 任務，每當完成一個方案或一個樓層就**必須**要調用 `capture_focused_view` 工具來截取畫面。截圖時如果設定相機位置，確保(`target_position`)位於方案的中心點。
     *   **僅當消息歷史清楚地表明計劃中的最後階段目標已成功執行**，你才能生成文本回復：`全部任務已完成` 以結束整個任務。
-9. 如果當前階段目標不需要工具即可完成（例如，僅需總結信息），請生成說明性的自然語言回應。
-10.若遇工具錯誤，分析錯誤原因 (尤其是代碼執行錯誤)，**嘗試修正你的工具調用參數或生成的代碼**，然後再次請求工具調用。如果無法修正，請報告問題。
-11.規劃數據摘要報告 (空間規劃任務的必要首步):僅當**任務是關於**空間佈局規劃** (例如，量體配置等)，你**必須在第一個步驟**執行生成摘要報告。
+11. 如果當前階段目標不需要工具即可完成（例如，僅需總結信息），請生成說明性的自然語言回應。
+12.若遇工具錯誤，分析錯誤原因 (尤其是代碼執行錯誤)，**嘗試修正你的工具調用參數或生成的代碼**，然後再次請求工具調用。如果無法修正，請報告問題。
+13.規劃數據摘要報告 (空間規劃任務的必要首步):僅當**任務是關於**空間佈局規劃** (例如，量體配置等)，你**必須在第一個步驟**執行生成摘要報告。
                                              
 **常規執行：對於計劃中的任何步驟，不要用自然語言解釋你要做什麼，直接生成包含 Tool Calls 結構的工具調用。**
 **關鍵指令：不要用自然語言解釋你要做什麼，直接根據你用上述演算法定位到的下一步驟，生成包含 Tool Calls 結構的工具調用。**
@@ -629,97 +737,177 @@ async def call_llm_with_tools(
     """
     調用 agent_llm (Gemini) 根據消息歷史（含計劃）和可用工具來執行下一步。
     輸入消息應已包含多模態內容。
+    會自動處理配額錯誤並切換到 VIP Key。
     """
-    print(f"  >> 調用 Agent LLM ({agent_llm.model}) 執行下一步 (使用提示: {execution_prompt.content[:50]}...)...")
     try:
-        # --- 使用輔助函數獲取 Gemini 兼容的工具定義 ---
-        print("     正在準備 Gemini 兼容的工具定義列表...")
-        gemini_compatible_tools = _prepare_gemini_compatible_tools(selected_tools)
-        print(f"     獲取了 {len(gemini_compatible_tools)} 個 Gemini 兼容的工具定義。")
-
-        # --- 綁定工具到 agent_llm ---
-        print("     正在將 MCP 工具 (含手動定義) 綁定到 LLM...")
-        llm_with_tools = agent_llm.bind_tools(gemini_compatible_tools) # Use corrected tools
-        print("     MCP 工具綁定完成。")
-
-        # --- 配置 Runnable 移除回調 ---
-        print("     正在配置 LLM runnable 以移除回調 (with_config)...")
-        llm_configured_no_callbacks = llm_with_tools.with_config({"callbacks": None})
-        print("     LLM runnable 配置完成 (callbacks=None)。")
-
-        # --- 準備調用消息 ---
-        # messages 列表應已包含正確格式化的多模態內容 (如果有的話)
-        current_call_messages = [execution_prompt] + messages # <<< 修改：使用傳入的 execution_prompt
-        print(f"     LLM 輸入消息數 (含執行提示): {len(current_call_messages)}")
-
-        # --- 添加詳細打印 (檢查多模態消息格式) ---
-        print("-" * 40)
-        print(">>> DEBUG: Messages Sent to LLM.ainvoke:")
-        for i, msg in enumerate(current_call_messages):
-            print(f"  Message {i} ({type(msg).__name__}):")
-            try:
-                # 使用更安全的方式獲取和打印內容
-                if isinstance(msg.content, str):
-                    content_repr = repr(msg.content)
-                elif isinstance(msg.content, list):
-                     # 對列表內容進行部分表示，避免過長
-                     content_repr = "[" + ", ".join(repr(item)[:100] + ('...' if len(repr(item)) > 100 else '') for item in msg.content) + "]"
-                else:
-                     content_repr = repr(msg.content)
-                print(f"    Content: {content_repr[:1000]}{'...' if len(content_repr) > 1000 else ''}")
-            except Exception as repr_err:
-                print(f"    Content: [Error representing content: {repr_err}]")
-
-            if isinstance(msg, AIMessage) and msg.tool_calls:
-                try:
-                    tool_calls_repr = repr(msg.tool_calls)
-                    print(f"    Tool Calls: {tool_calls_repr[:500]}{'...' if len(tool_calls_repr) > 500 else ''}")
-                except Exception as repr_err:
-                    print(f"    Tool Calls: [Error representing tool_calls: {repr_err}]")
-            elif isinstance(msg, ToolMessage) and hasattr(msg, 'tool_call_id'):
-                 print(f"    Tool Call ID: {msg.tool_call_id}")
-        print("-" * 40)
-        # --- 結束詳細打印 ---
-
-        # --- 執行 LLM 調用 (使用配置後的 Runnable，無 config 參數) ---
-        print("     正在調用配置後的 LLM.ainvoke...")
-        response = await llm_configured_no_callbacks.ainvoke(current_call_messages) # 直接傳遞消息列表
-        print(f"  << LLM 調用完成。")
-        if isinstance(response, AIMessage) and response.tool_calls:
-             print(f"     LLM 請求調用 {len(response.tool_calls)} 個工具。")
-        elif isinstance(response, AIMessage):
-             print(f"     LLM 返回內容: {response.content[:150]}...")
-             if "任務已完成" in response.content.lower():
-                 print("     偵測到 '任務已完成'。")
+        # --- 動態選擇 LLM (根據 API Key Manager) ---
+        global agent_llm, fast_llm, agent_llm_free, agent_llm_vip, fast_llm_free, fast_llm_vip
+        
+        if api_key_manager.should_use_vip():
+            llm_to_use = agent_llm_vip if agent_llm_vip else agent_llm_free
+            key_type = api_key_manager.get_current_key_type()
+            print(f"  >> 使用 {key_type} LLM ({llm_to_use.model})，剩餘 {api_key_manager.vip_calls_remaining} 輪")
         else:
-             print(f"     LLM 返回非預期類型: {type(response).__name__}")
-
-        return response
-
+            llm_to_use = agent_llm_free
+            key_type = api_key_manager.get_current_key_type()
+            print(f"  >> 使用 {key_type} LLM ({llm_to_use.model}) 執行下一步")
+        
     except Exception as e:
-        print(f"!! 執行 LLM 調用 (call_llm_with_tools) 時發生錯誤: {e}")
-        traceback.print_exc()
-        # ... (錯誤處理保持不變) ...
-        error_content = f"執行 LLM 決策時發生錯誤: {e}"
-        str_e = str(e)
-        if isinstance(e, ValueError) and "Unexpected message with type" in str_e:
-             error_content = f"內部錯誤：調用 LLM 時消息順序或類型不匹配。錯誤: {e}"
-        elif "Function and/or coroutine must be provided" in str_e or "bind_tools" in str_e.lower():
-             error_content = f"內部錯誤：綁定或調用工具時出錯。檢查工具定義或LLM兼容性。錯誤: {e}"
-        elif "InvalidArgument: 400" in str_e:
-             reason = "未知原因"
-             if "missing field" in str_e:
-                 reason = f"工具 Schema 無效 (即使手動修正後，仍可能存在問題或影響其他工具)"
-             elif "function declaration" in str_e:
-                  reason = f"工具函數聲明格式錯誤"
-             elif "contents" in str_e: # 檢查是否是內容格式錯誤
-                 reason = f"消息內容格式錯誤，可能多模態輸入未被正確處理"
-             error_content = f"內部錯誤：傳遞給 Gemini 的數據無效 ({reason})。錯誤: {e}"
-        else:
-             # 保留通用錯誤處理
-             pass # error_content 已在 try 塊外定義
+        print(f"Error selecting LLM: {e}")
+        llm_to_use = agent_llm_free
 
-        return AIMessage(content=error_content)
+    # 最多重試 4 次 (處理配額錯誤: Free -> VIP -> VIP Retry -> Fail)
+    max_retries = 4
+    for retry_count in range(max_retries):
+        try:
+            # --- 使用輔助函數獲取 Gemini 兼容的工具定義 ---
+            if retry_count == 0:  # 只在第一次打印
+                print("     正在準備 Gemini 兼容的工具定義列表...")
+            gemini_compatible_tools = _prepare_gemini_compatible_tools(selected_tools)
+            if retry_count == 0:
+                print(f"     獲取了 {len(gemini_compatible_tools)} 個 Gemini 兼容的工具定義。")
+
+            # --- 綁定工具到 LLM ---
+            if retry_count == 0:
+                print("     正在將 MCP 工具 (含手動定義) 綁定到 LLM...")
+            llm_with_tools = llm_to_use.bind_tools(gemini_compatible_tools)
+            if retry_count == 0:
+                print("     MCP 工具綁定完成。")
+
+            # --- 配置 Runnable 移除回調 ---
+            if retry_count == 0:
+                print("     正在配置 LLM runnable 以移除回調 (with_config)...")
+            llm_configured_no_callbacks = llm_with_tools.with_config({"callbacks": None})
+            if retry_count == 0:
+                print("     LLM runnable 配置完成 (callbacks=None)。")
+
+            # --- 準備調用消息 ---
+            current_call_messages = [execution_prompt] + messages
+            if retry_count == 0:
+                print(f"     LLM 輸入消息數 (含執行提示): {len(current_call_messages)}")
+
+            # --- 添加詳細打印 (檢查多模態消息格式) ---
+            print("-" * 40)
+            print(f">>> DEBUG: Messages Sent to LLM.ainvoke (Attempt {retry_count + 1}/{max_retries}):")
+            for i, msg in enumerate(current_call_messages):
+                print(f"  Message {i} ({type(msg).__name__}):")
+                try:
+                    # 使用更安全的方式獲取和打印內容
+                    if isinstance(msg.content, str):
+                        content_repr = repr(msg.content)
+                    elif isinstance(msg.content, list):
+                         # 對列表內容進行部分表示，避免過長
+                         content_repr = "[" + ", ".join(repr(item)[:100] + ('...' if len(repr(item)) > 100 else '') for item in msg.content) + "]"
+                    else:
+                         content_repr = repr(msg.content)
+                    print(f"    Content: {content_repr[:1000]}{'...' if len(content_repr) > 1000 else ''}")
+                except Exception as repr_err:
+                    print(f"    Content: [Error representing content: {repr_err}]")
+
+                if isinstance(msg, AIMessage) and msg.tool_calls:
+                    try:
+                        tool_calls_repr = repr(msg.tool_calls)
+                        print(f"    Tool Calls: {tool_calls_repr[:500]}{'...' if len(tool_calls_repr) > 500 else ''}")
+                    except Exception as repr_err:
+                        print(f"    Tool Calls: [Error representing tool_calls: {repr_err}]")
+                elif isinstance(msg, ToolMessage) and hasattr(msg, 'tool_call_id'):
+                     print(f"    Tool Call ID: {msg.tool_call_id}")
+            print("-" * 40)
+            # --- 結束詳細打印 ---
+
+            # --- 執行 LLM 調用 (使用配置後的 Runnable) ---
+            if retry_count == 0:
+                print(f"     正在調用配置後的 LLM.ainvoke (Model: {llm_to_use.model})...")
+            else:
+                print(f"     [Retry {retry_count}] 正在調用 LLM.ainvoke (Model: {llm_to_use.model})...")
+            
+            response = await llm_configured_no_callbacks.ainvoke(current_call_messages)
+            
+            # --- 成功調用，處理 VIP 計數器 ---
+            if api_key_manager.should_use_vip():
+                api_key_manager.decrement_vip_calls()
+            
+            if retry_count == 0:
+                print(f"  << LLM 調用完成。")
+            if isinstance(response, AIMessage) and response.tool_calls:
+                 print(f"     LLM 請求調用 {len(response.tool_calls)} 個工具。")
+            elif isinstance(response, AIMessage):
+                 print(f"     LLM 返回內容: {response.content[:150]}...")
+                 if "任務已完成" in response.content.lower():
+                     print("     偵測到 '任務已完成'。")
+            else:
+                 print(f"     LLM 返回非預期類型: {type(response).__name__}")
+
+            return response
+
+        except Exception as e:
+            str_e = str(e)
+            is_quota_error = ("429" in str_e and ("quota" in str_e.lower() or "rate" in str_e.lower())) or \
+                            ("Quota exceeded" in str_e) or \
+                            ("You exceeded your current quota" in str_e)
+            
+            if is_quota_error and retry_count < max_retries - 1:
+                print(f"  ⚠️  捕獲配額錯誤 (429 Quota Exceeded): {e}")
+                # 嘗試切換到 VIP
+                if api_key_manager.handle_quota_error():
+                    # 檢查 agent_llm_vip 是否可用
+                    if not agent_llm_vip:
+                        # 嘗試動態初始化 VIP Agent
+                        vip_key = os.getenv("GEMINI_API_KEY_VIP")
+                        if vip_key:
+                            print("  >> [Dynamic Init] 嘗試動態初始化 agent_llm_vip...")
+                            try:
+                                agent_llm_vip = ChatGoogleGenerativeAI(
+                                    model="gemini-2.5-pro",
+                                    temperature=0.5,
+                                    google_api_key=vip_key
+                                )
+                                print("  >> [Dynamic Init] agent_llm_vip 初始化成功！")
+                            except Exception as init_err:
+                                print(f"  >> [Dynamic Init] agent_llm_vip 初始化失敗: {init_err}")
+                        else:
+                            print("  >> [Dynamic Init] 失敗: 環境變數 GEMINI_API_KEY_VIP 未設置")
+
+                    # 切換 LLM
+                    if agent_llm_vip:
+                        llm_to_use = agent_llm_vip
+                        print(f"  >> ✅ 成功切換到 VIP LLM ({llm_to_use.model})")
+                    else:
+                        llm_to_use = agent_llm_free
+                        print(f"  >> ❌ 切換失敗: 無法獲取 VIP LLM 實例，將繼續使用 Free LLM 重試")
+
+                    print(f"  >> 第 {retry_count + 1}/{max_retries} 次重試即將開始...")
+                    await asyncio.sleep(2)  # 短暫等待
+                    continue  # 重試
+                else:
+                    # 沒有 VIP Key，無法繼續
+                    error_content = f"配額已滿且無 VIP Key 可用 (handle_quota_error returned False): {e}"
+                    print(f"!! {error_content}")
+                    return AIMessage(content=error_content)
+            
+            # 其他錯誤或已達最大重試次數
+            print(f"!! 執行 LLM 調用 (call_llm_with_tools) 時發生錯誤: {e}")
+            traceback.print_exc()
+            
+            error_content = f"執行 LLM 決策時發生錯誤: {e}"
+            if isinstance(e, ValueError) and "Unexpected message with type" in str_e:
+                 error_content = f"內部錯誤：調用 LLM 時消息順序或類型不匹配。錯誤: {e}"
+            elif "Function and/or coroutine must be provided" in str_e or "bind_tools" in str_e.lower():
+                 error_content = f"內部錯誤：綁定或調用工具時出錯。檢查工具定義或LLM兼容性。錯誤: {e}"
+            elif "InvalidArgument: 400" in str_e:
+                 reason = "未知原因"
+                 if "missing field" in str_e:
+                     reason = f"工具 Schema 無效 (即使手動修正後，仍可能存在問題或影響其他工具)"
+                 elif "function declaration" in str_e:
+                      reason = f"工具函數聲明格式錯誤"
+                 elif "contents" in str_e:
+                     reason = f"消息內容格式錯誤，可能多模態輸入未被正確處理"
+                 error_content = f"內部錯誤：傳遞給 Gemini 的數據無效 ({reason})。錯誤: {e}"
+
+            return AIMessage(content=error_content)
+    
+    # 如果所有重試都失敗
+    return AIMessage(content="LLM 調用失敗：已達最大重試次數")
 
 
 # --- NEW HELPER FUNCTION for preparing Gemini-compatible tools ---
@@ -1186,14 +1374,19 @@ async def agent_node_logic(state: MCPAgentState, config: RunnableConfig, mcp_nam
             基於使用者提供的文字請求、可選的圖像以及下方列出的可用工具，生成一個清晰的、**分階段目標**的計劃。
 
             **重要要求：**
-            1.  **量化與具體化:** 對於幾何操作 (Rhino/Revit)，每個階段目標**必須**包含盡可能多的**具體數值、尺寸、座標、角度、數量、距離、方向、或清晰的空間關係描述**。
-            2.  **邏輯順序:** 確保階段目標按邏輯順序排列，後續步驟依賴於先前步驟的結果。
-            3.  **基地與座標系統意識 (Rhino - 極度重要):**
+            1.  **細緻的分步規劃 (極度重要):** 
+                * 將任務拆解為**非常細緻的小步驟**，每個步驟應該是一個可以獨立完成的原子操作
+                * **避免在單一步驟中包含過多操作**。例如，"創建所有拱形肋條"應拆分為："創建第一個拱形肋條輪廓" → "擠出第一個肋條" → "陣列複製肋條"
+                * **代碼複雜度考量:** 每個步驟應該對應不超過 50-80 行的代碼量
+                * 如果某個操作涉及多個子物件或重複動作，應該規劃為多個獨立步驟
+            2.  **量化與具體化:** 對於幾何操作 (Rhino/Revit)，每個階段目標**必須**包含盡可能多的**具體數值、尺寸、座標、角度、數量、距離、方向、或清晰的空間關係描述**。
+            3.  **邏輯順序:** 確保階段目標按邏輯順序排列，後續步驟依賴於先前步驟的結果。
+            4.  **基地與座標系統意識 (Rhino - 極度重要):**
                 *   **確立基準方位:** 在進行任何與基地佈局相關的規劃時，**第一步必須是確立一個清晰的座標系統和方向基準**。明確定義「北」方與其他「東、西、南」對應的向量（例如，世界座標的Y軸正方向 `(0, 1, 0)`），並在後續所有步驟中嚴格遵守此基準。
                 *   **邊界意識:** 如果任務提供了基地邊界，**必須**將處理基地邊界作為優先步驟。
                     *   a. 規劃創建或識別代表基地邊界的曲線。
                     *   b. 在規劃放置任何建築量體、道路或景觀元素之前，**必須**先驗證其預計位置**完全位於**已定義的基地邊界內部。可以規劃獲取基地邊界的 bounding box 作為快速檢查。
-            4.  **空間佈局規劃 (Rhino):**
+            5.  **空間佈局規劃 (Rhino):**
                     *   當任務涉及空間配置或多個量體的佈局時，計劃應明確描述這些量體之間的**拓撲關係** (如相鄰、共享面、包含) 和**相對位置** (如A在B的上方，C在D的西側並偏移X單位)。
                     *   **空間單元化原則：原則上，每一個獨立的功能空間（例如客廳、單獨的臥室、廚房、衛生間等）都應該規劃為一個獨立的幾何量體。避免使用單一量體代表多個不同的功能空間。為每個規劃生成的獨立空間量體或重要動線元素指定一個有意義的臨時名稱或標識符，並在後續的建模步驟中通過 Rhino 的 `add_object_metadata()` 功能將此名稱賦予對應的 Rhino 物件。**
                     *   **圖層規劃 - 初始設定：** 在開始任何建模或創建新的方案/基礎圖層 (如 "方案A", "Floor_1") 之前，**必須**規劃一個步驟：首先獲取當前場景中的所有圖層列表，然後將所有已存在的**頂層圖層**及其子圖層設置為不可見。這樣可以確保在一個乾淨的環境中開始新的設計工作。之後再創建並設置當前工作所需的圖層。
@@ -1203,16 +1396,16 @@ async def agent_node_logic(state: MCPAgentState, config: RunnableConfig, mcp_nam
                         *   所有動線元素也必須根據其服務的樓層或連接關係，正確地規劃到相應的圖層下。
                     *   在進行複雜的空間佈局規劃時，可以先(以文字描述的形式)構思一個2D平面上的關係草圖，標註出各個獨立空間量體和動線的大致位置、尺寸和鄰接關係，然後再將此2D關係轉化為3D建模步驟的規劃。
                 *   規劃時需仔細考慮並確保最終生成的**量體數量、各個空間量體的具體位置和尺寸**符合設計意圖和空間邏輯。 **對於每個創建的空間，必須使用 `rs.AddTextDot("空間名稱", (x,y,z))` 在其量體中心附近標示空間名稱。絕對禁止使用 `rs.AddText()` 或 `rs.SetUserText()`。**
-            5.  **多方案與多樓層處理 (Rhino):**
+            6.  **多方案與多樓層處理 (Rhino):**
                 *   如果用戶請求中明確要求"多方案"或"不同選項"，**必須**將每個方案視為一個**獨立的、完整的任務序列**來規劃。
                 *   為每個方案指定一個清晰的名稱或標識符 (例如 "方案A_現代風格", "方案B_傳統風格")，並在整個方案的規劃和執行階段中使用此標識。
                 *   計劃應清晰地標示每個方案的開始和結束。
                 *   **對於包含多個樓層的設計方案，在完成每一樓層的主要建模內容後，應規劃一次詳細的截圖步驟。多方案規劃時每一方案完成後也同樣。 (參考下方截圖規劃詳細流程)。**
                 *   對於多樓層可以規劃同時展示所有樓層的截圖總覽，但對於多方案不用。
-            6.  **造型與形態規劃 (Rhino):**
+            7.  **造型與形態規劃 (Rhino):**
                 *   當任務目標涉及'造型方案'、'形態生成'或對現有量體進行'外觀設計'時，規劃階段應積極考慮如何利用布林運算 (如加法、減法、交集) 和幾何變換 (如扭轉、彎曲、陣列、縮放、旋轉) 等高級建模技巧來達成獨特且具有空間感的「虛、實」幾何形態。
                 *   **如要創造更具特殊性、流動性或有機感的造型，應考慮並規劃使用多種曲面生成與編輯技巧。規劃時應考慮工具的輸入要求：**
-                    *   **曲面應用技巧：** 優先規劃從曲線或曲面創建實體或有厚度的曲面，不要只是開放曲面。應用上盡量不要混雜保持造型純粹性。
+                    *   **曲面應用技巧：** 優先規劃從曲線或曲面創建**封閉實體**或有厚度的曲面，不要只是開放曲面。應用上盡量不要混雜保持造型純粹性。**在規劃中必須明確要求對創建的曲面進行封閉性檢查和修正。**
                     *   **曲面創建類別：**
                         *   **掃掠 (Sweep):**
                             *   `rs.AddSweep1(rail_curve_id, shape_curve_ids)`: 將剖面曲線列表 `shape_curve_ids` 沿單一軌道 `rail_curve_id` 掃掠成曲面。注意剖面曲線的方向和順序。
@@ -1229,24 +1422,29 @@ async def agent_node_logic(state: MCPAgentState, config: RunnableConfig, mcp_nam
                             *   `rs.ExtrudeCurveStraight(curve_id, start_point, end_point)` 或 `rs.ExtrudeCurveStraight(curve_id, direction_vector)`: 將曲線 `curve_id` 沿直線擠出指定距離和方向。
                             *   `rs.ExtrudeCurveTapered(curve_id, distance, direction, base_point, angle)`: 將曲線 `curve_id` 沿 `direction` 方向擠出 `distance` 距離，同時以 `base_point` 為基準、按 `angle` 角度進行錐化。
                             *   `rs.ExtrudeSurface(surface_id, path_curve_id, cap=True/False)`: 將曲面 `surface_id` 沿路徑曲線 `path_curve_id` 擠出成實體或開放形狀，可選是否封口 (`cap`)。
+                    *   **封閉性檢查規劃 (極度重要):**
+                        *   規劃中必須包含獨立的步驟來檢查並修正曲面的封閉性
+                        *   使用 `rs.IsClosed()` 檢查物件是否封閉，使用 `rs.CapPlanarHoles()` 封閉平面開口
+                        *   對於擠出操作，規劃時應明確指定使用 `cap=True` 來自動封閉端面
+                        *   優先規劃使用能直接生成封閉實體的建模方法
                 *   在計劃中明確指出預計在哪些步驟使用這些技巧，以及預期達成的形態效果和所需的輸入物件。造型上應具有特殊的美學價值並符合設計概念。
-            7.  **圖像參考規劃 (若有提供圖像):**
+            8.  **圖像參考規劃 (若有提供圖像):**
                 *   在生成具體的建模計劃之前，**必須**先進行詳細的"圖像分析與解讀"階段。
                 *   規劃時應基於：觀察到的主要建築體塊組成和它們之間的**空間布局關係**（例如，穿插、並列、堆疊）；估計主要部分之間的精確長、寬、高比例關係；主次要量體的位置關係；主要的立面特徵（重點是整體形態）；柱子及其他特殊形式。
                 *   **必須**將上述圖像分析得出的觀察結果，轉化為後續 Rhino 建模步驟中的具體參數和操作指導。**需特別注意絕對座標上的位置關係；方體的高度及角度關係；長短邊的方向關係，以構成符合圖片目標的建築塊體。**
                 *   **如果任務是參考圖片進行空間佈局(或量體配置)規劃，要在主要建築塊體的關係下發展詳細量體及空間配置。不需要建立精確立面等細部特徵。**
-            8.  **截圖規劃詳細流程 (Rhino/Revit):**
+            9.  **截圖規劃詳細流程 (Rhino/Revit):**
                 *   **截圖策略：** 規劃應分為兩個主要截圖階段，以確保成果的完整展示：
                     1.  **整體視圖階段：** 在所有主要建模步驟完成後，首先規劃生成一到兩個能夠展示整體設計的**透視 (`perspective`) 或兩點透視 (`two_point`)** 視圖。在執行此階段的截圖時，**必須確保所有與設計方案相關的圖層（例如所有樓層、外部造型、基地等）都是可見的**，以呈現完整的模型。
                     2.  **分層平面圖階段：** 如果是量體或平面規劃任務，在整體視圖截圖完成後，再針對**每一個樓層**規劃生成單獨的、**俯視的平行投影 (`parallel`)** 視圖。在執行此階段的截圖時，**必須只顯示當前正在截圖的樓層圖層**，並隱藏所有其他不相關的樓層圖層，以確保平面圖的清晰性。
                 *   **每張截圖的詳細步驟：**
-                    a.  **設定視圖與投影：** 明確指定投影模式 (`perspective`, `two_point`, `parallel`) 並設定適當的鏡頭角度。對於俯視平面圖，必須使用 `parallel` 模式。**對於目的為渲染的模型，適用於`two_point`並配合相機採用人視角(`z=2`,`lens_angle=10`)；展示其他類型的模型，適用於`perspective`。**
+                    a.  **設定視圖與投影：** 明確指定投影模式 (`perspective`, `two_point`, `parallel`) 並設定適當的鏡頭角度。
                     b.  **管理圖層可見性 (關鍵)：** 規劃獲取當前場景中所有圖層的列表後，根據上述的「整體視圖」或「分層平面圖」策略，精確地規劃顯示或隱藏哪些圖層。
-                    c.  **設定相機 (可選但建議)：** 對於透視圖，規劃設定相機位置 (`camera_position`) 和目標點 (`target_position`)，以獲得最佳視角。例如，人視角高度約為 `z=2`,`lens_angle=10`，鳥瞰視角可以更高。**不論何時，必須確保相機旋轉設定為0，切勿讓其變為-90度。**
+                    c.  **設定相機 (可選但建議)：** 對於透視圖，規劃設定相機位置(`camera_position`)參數為高度與鏡頭角度(`z, lens_angle`) 和目標點 (`target_position`)，以獲得最佳視角。鳥瞰視角可以更高。**不論何時，必須確保相機旋轉設定為0，切勿讓其變為-90度。**
                     d.  **執行截圖：** 規劃調用 `capture_focused_view` 工具。 建議設定相機後還要使用zoom功能鎖定目標。 
-            9.  **目標狀態:** 計劃應側重於**每個階段要達成的目標狀態**，說明該階段完成後場景應有的變化。
+            10.  **目標狀態:** 計劃應側重於**每個階段要達成的目標狀態**，說明該階段完成後場景應有的變化。
                 *   **最後一個計劃應包含"全部任務已完成"時的相關行動，引導實際執行時的處理。**
-            10.  **規劃數據摘要報告 (空間規劃任務的必要首步):**
+            11.  **規劃數據摘要報告 (空間規劃任務的必要首步):**
                 *   **僅當**任務是關於**空間佈局規劃** (例如，量體配置等)，你**必須**將生成摘要報告作為計劃的**第一個步驟**。
                 *   **此步驟基於你即將制定的後續建模步驟，先行總結和報告規劃的量化數據。如果是要求分析已有的方案，則應該要先分析再進行數據摘要整理。**
                 *   **規劃的第一步應如下：**
@@ -1255,7 +1453,7 @@ async def agent_node_logic(state: MCPAgentState, config: RunnableConfig, mcp_nam
                     3.  **規劃首個工具調用:** 將匯總好的數據（`data_rows` - 其中每個空間字典需包含 `name`, `area`, `percentage` **和 `floor`**，`total_area`, `bcr`, `far`）作為參數，將對 `create_planned_data_summary_csv` 工具的調用規劃為整個計劃的**第 1 步**。
                     4.  **後續步驟:** 在此報告步驟之後，再依次列出所有實際的 Rhino 模型建構步驟。
 
-            **rhino提醒:目前單位是M(公尺)。**這個計劃應側重於**每個階段要達成的目標狀態並包含細節**，而不是具體的工具使用細節。將任務分解成符合邏輯順序及細節的多個階段目標。直接輸出這個階段性目標計劃，不要额外的開場白或解釋。
+            **rhino提醒:目前單位是公分。**這個計劃應側重於**每個階段要達成的目標狀態並包含細節**，而不是具體的工具使用細節。將任務分解成符合邏輯順序及細節的多個階段目標。直接輸出這個階段性目標計劃，不要额外的開場白或解釋。
             可用工具如下 ({mcp_name}):
             {tool_descriptions}"""
             elif mcp_name == "pinterest":

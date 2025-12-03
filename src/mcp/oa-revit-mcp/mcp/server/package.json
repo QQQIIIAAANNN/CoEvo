@@ -1,0 +1,40 @@
+{
+  "name": "revit-mcp",
+  "version": "1.0.0",
+  "description": "- `create_object` - Create a new object with detailed parameters\r - `delete_object` - Remove an object from view\r - `modify_object` - Modify an existing object's properties",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "revit-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "clean": "rimraf build",
+    "prebuild": "npm run clean",
+    "build": "tsc"
+  },
+  "files": [
+    "build"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lisiting01/revit-mcp.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/lisiting01/revit-mcp/issues"
+  },
+  "homepage": "https://github.com/lisiting01/revit-mcp#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "ws": "^8.18.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/ws": "^8.18.0",
+    "rimraf": "^5.0.10",
+    "typescript": "^5.8.2"
+  }
+}

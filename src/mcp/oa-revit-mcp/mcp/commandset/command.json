@@ -1,0 +1,24 @@
+{
+  "name": "RevitMCPCommandSet",
+  "description": "Basic command collection for Revit AI assistance",
+  "developer": {
+    "name": "revit-mcp",
+    "email": "",
+    "website": "",
+    "organization": "revit-mcp"
+  },
+  "commands": [
+    {
+      "commandName": "send_code_to_revit",
+      "description": "Send C# code to Revit for execution.",
+      "assemblyPath": "RevitMCPCommandSet.dll",
+      "type": "adhoc"
+    },
+    {
+      "commandName": "create_rooms_and_tags",
+      "description": "在所有封閉區域中建立房間，並在每個房間放 RoomTag",
+      "assemblyPath": "RevitMCPCommandSet.dll",
+      "type": "adhoc"
+    }
+  ]
+}

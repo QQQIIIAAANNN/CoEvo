@@ -1,0 +1,114 @@
+{
+  "name": "RevitMCPCommandSet",
+  "description": "Basic command collection for Revit AI assistance",
+  "developer": {
+    "name": "revit-mcp",
+    "email": "",
+    "website": "",
+    "organization": "revit-mcp"
+  },
+  "commands": [
+    {
+      "commandName": "get_selected_elements",
+      "description": "Gets details about elements currently selected by the user.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "get_current_view_info",
+      "description": "Fetches information about the currently active view in Revit.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "get_current_view_elements",
+      "description": "Lists all elements visible in the current Revit view.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "get_available_family_types",
+      "description": "Retrieves available types of families (reusable components) in the project.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "delete_element",
+      "description": "Delete element",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "create_surface_based_element",
+      "description": "Creates elements based on a surface (floors, ceilings).",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "create_point_based_element",
+      "description": "Creates elements placed by a single point (doors, windows, furniture).",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "create_line_based_element",
+      "description": "Creates elements defined by a line (walls, beams, pipes).",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "color_elements",
+      "description": "Applies colors to elements based on parameter values.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "ai_element_filter",
+      "description": "Filters elements based on AI-provided criteria.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "tag_all_walls",
+      "description": "Automatically adds annotation tags to all walls in the current view.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "store_room_data",
+      "description": "Stores room data for later use.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "store_project_data",
+      "description": "Stores project data for later use.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "send_code_to_revit",
+      "description": "Send C# code to Revit for execution.",
+      "assemblyPath": "RevitMCPCommandSet.dll",
+      "type": "adhoc"
+    },
+    {
+      "commandName": "query_stored_data",
+      "description": "Query stored data for later use.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "operate_element",
+      "description": "Operate element",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "search_modules",
+      "description": "Searches for available custom modules or commands within the plugin.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "use_module",
+      "description": "Executes a specific module or command.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "get_module_info",
+      "description": "Retrieves information about a specific module or command.",
+      "assemblyPath": "RevitMCPCommandSet.dll"
+    },
+    {
+      "commandName": "create_rooms_and_tags",
+      "description": "在所有封閉區域中建立房間，並在每個房間放 RoomTag",
+      "assemblyPath": "RevitMCPCommandSet.dll",
+      "type": "adhoc"
+    }
+  ]
+}
